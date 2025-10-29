@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: bluegreen-svc
+  namespace: bluegreen
+spec:
+  type: NodePort            # use LoadBalancer if on cloud; NodePort for local
+  selector:
+    app: bluegreen
+    color: blue             # 👈 Jenkins will patch this between blue/green
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080

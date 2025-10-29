@@ -1,0 +1,4 @@
+﻿spec:
+  selector:
+    app: bluegreen
+    color: blue
