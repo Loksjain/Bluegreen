@@ -22,25 +22,26 @@ pipeline {
     }
 
     stage('Build & Push Docker Image') {
-      steps {
-        script {
-          def TAG = "${params.ACTIVE_COLOR}-${env.BUILD_NUMBER}"
-          echo "🐳 Building and pushing Docker image: ${IMAGE_REPO}:${TAG}"
+  steps {
+    script {
+      // ✅ Automatically build the opposite (target) color
+      def TARGET_COLOR = (params.ACTIVE_COLOR == 'blue') ? 'green' : 'blue'
+      def TAG = "${TARGET_COLOR}-${env.BUILD_NUMBER}"
 
-          // ✅ FIXED: changed from triple-single quotes to triple-double quotes
-          sh """
-            echo "🔐 Logging into Docker Hub..."
-            docker login -u ${DOCKERHUB_CREDS_USR} -p ${DOCKERHUB_CREDS_PSW}
+      echo "🐳 Building and pushing Docker image: ${IMAGE_REPO}:${TAG}"
 
-            echo "🏗️  Building image..."
-            docker build -t ${IMAGE_REPO}:${TAG} app
-
-            echo "📤 Pushing image to Docker Hub..."
-            docker push ${IMAGE_REPO}:${TAG}
-          """
-        }
-      }
+      sh """
+        echo "🔐 Logging into Docker Hub..."
+        docker login -u $DOCKERHUB_CREDS_USR -p $DOCKERHUB_CREDS_PSW
+        echo "🏗️  Building image..."
+        docker build -t $IMAGE_REPO:$TAG app
+        echo "📤 Pushing image to Docker Hub..."
+        docker push $IMAGE_REPO:$TAG
+      """
     }
+  }
+}
+
 
     stage('Deploy to Kubernetes') {
   steps {
