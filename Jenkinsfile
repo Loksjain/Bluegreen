@@ -2,118 +2,96 @@ pipeline {
   agent any
 
   environment {
-    DOCKERHUB_CREDS = credentials('dockerhub-creds')    // create in Jenkins
-    DOCKER_USER     = 'loksjain25'                       // <— change if needed
+    DOCKERHUB_CREDS = credentials('dockerhub-creds')
+    DOCKER_USER     = 'loksjain25'
     IMAGE_REPO      = "${DOCKER_USER}/bluegreen"
     KUBE_NAMESPACE  = 'bluegreen'
-    APP_NAME        = 'bluegreen'                         // common app label
   }
 
   parameters {
-    choice(name: 'ACTIVE_COLOR', choices: ['blue','green'], description: 'Current live color (what Service points to now)')
-    booleanParam(name: 'SWITCH_TRAFFIC', defaultValue: true, description: 'Switch traffic to the newly deployed color after health check')
+    choice(name: 'ACTIVE_COLOR', choices: ['blue','green'], description: 'Currently live color')
   }
 
   stages {
+
     stage('Checkout') {
-      steps { checkout scm }
+      steps {
+        echo "🔄 Checking out code from GitHub..."
+        git branch: 'main', url: 'https://github.com/Loksjain/Bluegreen.git'
+      }
     }
 
-    stage('Docker Build & Push (blue/green)') {
+    stage('Build & Push Docker Image') {
       steps {
         script {
-          sh """
-            docker login -u ${DOCKERHUB_CREDS_USR} -p ${DOCKERHUB_CREDS_PSW}
-            # Build blue (tagged with BUILD_NUMBER)
-            docker build -t ${IMAGE_REPO}:blue-${BUILD_NUMBER} app
-            # Rebuild green with a tiny label change to avoid cache (optional)
-            docker build --build-arg CACHE_BUSTER=${BUILD_NUMBER} -t ${IMAGE_REPO}:green-${BUILD_NUMBER} app
+          def TAG = "${params.ACTIVE_COLOR}-${env.BUILD_NUMBER}"
+          echo "🐳 Building and pushing Docker image: ${IMAGE_REPO}:${TAG}"
 
-            docker push ${IMAGE_REPO}:blue-${BUILD_NUMBER}
-            docker push ${IMAGE_REPO}:green-${BUILD_NUMBER}
-          """
+          sh '''
+            echo "🔐 Logging into Docker Hub..."
+            docker login -u $DOCKERHUB_CREDS_USR -p $DOCKERHUB_CREDS_PSW
+            echo "🏗️  Building image..."
+            docker build -t $IMAGE_REPO:$TAG app
+            echo "📤 Pushing image to Docker Hub..."
+            docker push $IMAGE_REPO:$TAG
+          '''
         }
       }
     }
 
-    stage('K8s Apply Base Manifests (once)') {
-      when { expression { return params.BUILD_NUMBER == '1' } }  // first run only (or remove the when to always apply)
-      steps {
-        sh """
-          kubectl apply -f k8s/namespace.yaml
-          kubectl -n ${KUBE_NAMESPACE} apply -f k8s/service.yaml
-          kubectl -n ${KUBE_NAMESPACE} apply -f k8s/deploy-blue.yaml
-          kubectl -n ${KUBE_NAMESPACE} apply -f k8s/deploy-green.yaml
-        """
-      }
-    }
-
-    stage('Decide Target Color') {
+    stage('Deploy to Kubernetes') {
       steps {
         script {
-          // if active is blue, we deploy green; if active is green, we deploy blue
-          TARGET_COLOR = (params.ACTIVE_COLOR == 'blue') ? 'green' : 'blue'
-          echo "ACTIVE_COLOR=${params.ACTIVE_COLOR} -> TARGET_COLOR=${TARGET_COLOR}"
+          def TARGET_COLOR = (params.ACTIVE_COLOR == 'blue') ? 'green' : 'blue'
+          def TAG = "${TARGET_COLOR}-${env.BUILD_NUMBER}"
+          def DEPLOY = "${TARGET_COLOR}-deploy"
+
+          echo "🚀 Deploying ${DEPLOY} with tag ${TAG}"
+
+          sh '''
+            echo "📦 Updating deployment..."
+            kubectl -n ${KUBE_NAMESPACE} set image deployment/${DEPLOY} web=${IMAGE_REPO}:${TAG}
+            kubectl -n ${KUBE_NAMESPACE} set env deployment/${DEPLOY} VERSION=${TAG}
+            echo "⏳ Waiting for rollout to complete..."
+            kubectl -n ${KUBE_NAMESPACE} rollout status deployment/${DEPLOY} --timeout=120s
+          '''
         }
       }
     }
 
-    stage('Update Target Deployment Image & Version Env') {
+    stage('Switch Traffic (Blue ↔ Green)') {
       steps {
         script {
-          def tag = "${TARGET_COLOR}-${BUILD_NUMBER}"
-          def deploy = "${TARGET_COLOR}-deploy"
-          sh """
-            # set container image
-            kubectl -n ${KUBE_NAMESPACE} set image deployment/${deploy} web=${IMAGE_REPO}:${tag}
-            # update VERSION env (purely cosmetic on page)
-            kubectl -n ${KUBE_NAMESPACE} set env deployment/${deploy} VERSION='${tag}'
-            # wait for rollout
-            kubectl -n ${KUBE_NAMESPACE} rollout status deployment/${deploy} --timeout=120s
-          """
+          def TARGET_COLOR = (params.ACTIVE_COLOR == 'blue') ? 'green' : 'blue'
+          echo "🌐 Switching Service traffic to ${TARGET_COLOR}"
+
+          writeFile file: 'patch.json', text: """{"spec":{"selector":{"app":"bluegreen","color":"${TARGET_COLOR}"}}}"""
+          sh 'kubectl -n bluegreen patch service bluegreen-svc --type merge --patch-file patch.json'
+
+          echo "✅ Traffic switched to ${TARGET_COLOR}"
         }
       }
     }
 
-    stage('Smoke Test Target Color') {
+    stage('Verify Deployment') {
       steps {
-        script {
-          // simple in-cluster test via temporary pod curl
-          def deploy = "${TARGET_COLOR}-deploy"
-          sh """
-            kubectl -n ${KUBE_NAMESPACE} run curl-test --image=curlimages/curl:8.7.1 --rm -i --restart=Never -- \
-              sh -c 'sleep 2; echo -n "Health: "; curl -s http://$(kubectl -n ${KUBE_NAMESPACE} get pod -l color=${TARGET_COLOR},app=${APP_NAME} -o jsonpath="{.items[0].status.podIP}"):8080/healthz'
-          """
-        }
-      }
-    }
-
-    stage('Switch Traffic (Service selector)') {
-      when { expression { return params.SWITCH_TRAFFIC } }
-      steps {
-        script {
-          sh """
-            echo "Switching Service selector to color=${TARGET_COLOR}"
-            kubectl -n ${KUBE_NAMESPACE} patch service bluegreen-svc -p '{ "spec": { "selector": { "app": "${APP_NAME}", "color": "${TARGET_COLOR}" } } }'
-            kubectl -n ${KUBE_NAMESPACE} get svc bluegreen-svc -o wide
-          """
-        }
+        echo "🧪 Verifying active service response..."
+        sh '''
+          kubectl -n ${KUBE_NAMESPACE} run curl-test \
+            --image=curlimages/curl:8.7.1 \
+            --rm -i --restart=Never -- \
+            curl -s http://bluegreen-svc
+        '''
       }
     }
   }
 
   post {
     success {
-      script {
-        def old = (params.ACTIVE_COLOR == 'blue') ? 'blue' : 'green'
-        def newColor = (params.ACTIVE_COLOR == 'blue') ? 'green' : 'blue'
-        echo "Traffic now on: ${newColor}"
-        // Optional: scale down the old color to save resources
-        sh "kubectl -n ${KUBE_NAMESPACE} scale deploy/${old}-deploy --replicas=1 || true"
-      }
+      echo "✅ Blue-Green Deployment completed successfully!"
     }
     failure {
-      echo "Build failed. No traffic switch performed."
+      echo "❌ Deployment failed — check console logs for details."
     }
   }
 }
