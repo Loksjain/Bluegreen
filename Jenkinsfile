@@ -43,24 +43,26 @@ pipeline {
     }
 
     stage('Deploy to Kubernetes') {
-      steps {
-        script {
-          def TARGET_COLOR = (params.ACTIVE_COLOR == 'blue') ? 'green' : 'blue'
-          def TAG = "${TARGET_COLOR}-${env.BUILD_NUMBER}"
-          def DEPLOY = "${TARGET_COLOR}-deploy"
+  steps {
+    script {
+      def TARGET_COLOR = (params.ACTIVE_COLOR == 'blue') ? 'green' : 'blue'
+      def TAG = "${TARGET_COLOR}-${env.BUILD_NUMBER}"
+      def DEPLOY = "${TARGET_COLOR}-deploy"
 
-          echo "🚀 Deploying ${DEPLOY} with tag ${TAG}"
+      echo "🚀 Deploying ${DEPLOY} with tag ${TAG}"
 
-          sh '''
-            echo "📦 Updating deployment..."
-            kubectl -n ${KUBE_NAMESPACE} set image deployment/${DEPLOY} web=${IMAGE_REPO}:${TAG}
-            kubectl -n ${KUBE_NAMESPACE} set env deployment/${DEPLOY} VERSION=${TAG}
-            echo "⏳ Waiting for rollout to complete..."
-            kubectl -n ${KUBE_NAMESPACE} rollout status deployment/${DEPLOY} --timeout=120s
-          '''
-        }
-      }
+      // ✅ FIXED: switched to triple double quotes so variables expand
+      sh """
+        echo "📦 Updating deployment..."
+        kubectl -n ${KUBE_NAMESPACE} set image deployment/${DEPLOY} web=${IMAGE_REPO}:${TAG}
+        kubectl -n ${KUBE_NAMESPACE} set env deployment/${DEPLOY} VERSION=${TAG}
+        echo "⏳ Waiting for rollout to complete..."
+        kubectl -n ${KUBE_NAMESPACE} rollout status deployment/${DEPLOY} --timeout=120s
+      """
     }
+  }
+}
+
 
     stage('Switch Traffic (Blue ↔ Green)') {
       steps {
